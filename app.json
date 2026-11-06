@@ -1,0 +1,19 @@
+{
+  "expo": {
+    "name": "Analizador de equipo",
+    "slug": "analizador-de-equipo",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.equipoanalizador"
+    },
+    "plugins": [
+      "expo-status-bar",
+      "expo-secure-store"
+    ]
+  }
+}
