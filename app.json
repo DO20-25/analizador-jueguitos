@@ -2,6 +2,7 @@
   "expo": {
     "name": "Analizador de equipo",
     "slug": "analizador-de-equipo",
+    "scheme": "analizadorequipo",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
@@ -13,7 +14,13 @@
     },
     "plugins": [
       "expo-status-bar",
-      "expo-secure-store"
-    ]
+      "expo-secure-store",
+      "expo-web-browser"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "6ae62289-9404-4395-9347-7c2690ec7515"
+      }
+    }
   }
 }

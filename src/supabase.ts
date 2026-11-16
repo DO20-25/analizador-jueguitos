@@ -45,7 +45,7 @@ export const supabase =
           storage,
           autoRefreshToken: true,
           persistSession: true,
-          detectSessionInUrl: false,
+          detectSessionInUrl: Platform.OS === "web",
         },
       })
     : null;

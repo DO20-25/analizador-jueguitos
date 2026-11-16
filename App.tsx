@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import QRCode from "react-native-qrcode-svg";
 import {
   Platform,
   Pressable,
@@ -8,6 +9,8 @@ import {
   TextInput,
   View,
 } from "react-native";
+import * as Linking from "expo-linking";
+import * as WebBrowser from "expo-web-browser";
 import { GLView } from "expo-gl";
 import * as Device from "expo-device";
 import { StatusBar } from "expo-status-bar";
@@ -136,6 +139,19 @@ export default function App() {
   const [password, setPassword] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
   const [authMessage, setAuthMessage] = useState("");
+  // Estados para Google Authenticator (MFA)
+  const [mfaFactorId, setMfaFactorId] = useState<string | null>(null);
+  const [mfaSecret, setMfaSecret] = useState("");
+  const [mfaUri, setMfaUri] = useState("");
+  const [mfaCode, setMfaCode] = useState("");
+  const [mfaMessage, setMfaMessage] = useState("");
+  const [mfaLoading, setMfaLoading] = useState(false);
+  const [mfaEnabled, setMfaEnabled] = useState(false);
+  // Estados para verificar MFA durante el inicio de sesión
+  const [mfaRequired, setMfaRequired] = useState(false);
+  const [mfaCheckLoading, setMfaCheckLoading] = useState(false);
+  const [mfaLoginCode, setMfaLoginCode] = useState("");
+  const [mfaLoginMessage, setMfaLoginMessage] = useState("");
   const [catalog, setCatalog] = useState<GameRecord[]>([]);
   const [catalogMessage, setCatalogMessage] = useState("");
   const [catalogLoading, setCatalogLoading] = useState(false);
@@ -187,6 +203,76 @@ export default function App() {
       subscription.unsubscribe();
     };
   }, []);
+
+  useEffect(() => {
+    if (!supabase || !session) {
+      setMfaRequired(false);
+      setMfaEnabled(false);
+      setMfaFactorId(null);
+      setMfaCheckLoading(false);
+      return;
+    }
+
+    let active = true;
+
+    async function checkMfa() {
+      setMfaCheckLoading(true);
+      setMfaLoginMessage("");
+
+      try {
+        const { data: assurance, error: assuranceError } =
+          await supabase!.auth.mfa.getAuthenticatorAssuranceLevel();
+
+        if (assuranceError) {
+          throw assuranceError;
+        }
+
+        const { data: factors, error: factorsError } =
+          await supabase!.auth.mfa.listFactors();
+
+        if (factorsError) {
+          throw factorsError;
+        }
+
+        if (!active) {
+          return;
+        }
+
+        const verifiedFactor = factors.totp.find(
+          (factor) => factor.status === "verified",
+        );
+        console.log("Factor MFA verificado:", verifiedFactor);
+        setMfaEnabled(Boolean(verifiedFactor));
+        setMfaFactorId(verifiedFactor?.id ?? null);
+
+        const requiresSecondFactor =
+          assurance.currentLevel === "aal1" &&
+          assurance.nextLevel === "aal2" &&
+          Boolean(verifiedFactor);
+
+        setMfaRequired(requiresSecondFactor);
+      } catch (error: unknown) {
+        if (active) {
+          setMfaRequired(true);
+          setMfaLoginMessage(
+            error instanceof Error
+              ? error.message
+              : "No se pudo comprobar la autenticación.",
+          );
+        }
+      } finally {
+        if (active) {
+          setMfaCheckLoading(false);
+        }
+      }
+    }
+
+    void checkMfa();
+
+    return () => {
+      active = false;
+    };
+  }, [session]);
 
   useEffect(() => {
     if (!supabase) {
@@ -409,6 +495,207 @@ export default function App() {
     }
   }
 
+  async function handleGoogleSignIn() {
+    if (!supabase) {
+      setAuthMessage("Supabase no está configurado.");
+      return;
+    }
+
+    setAuthLoading(true);
+    setAuthMessage("");
+
+    try {
+      const redirectTo =
+        Platform.OS === "web"
+          ? window.location.origin
+          : Linking.createURL("google-auth");
+
+      const { data, error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: {
+          redirectTo,
+          skipBrowserRedirect: Platform.OS !== "web",
+          queryParams: {
+            prompt: "select_account",
+          },
+        },
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      if (!data.url) {
+        throw new Error("No se recibió la dirección de autenticación.");
+      }
+
+      if (Platform.OS !== "web") {
+        const result = await WebBrowser.openAuthSessionAsync(
+          data.url,
+          redirectTo,
+        );
+
+        if (result.type === "success") {
+          const callbackUrl = new URL(result.url);
+          const code = callbackUrl.searchParams.get("code");
+
+          if (!code) {
+            throw new Error("No se recibió el código de autenticación.");
+          }
+
+          const { data: sessionData, error: sessionError } =
+            await supabase.auth.exchangeCodeForSession(code);
+
+          if (sessionError) {
+            throw sessionError;
+          }
+
+          setSession(sessionData.session);
+          setAuthMessage("Sesión iniciada con Google.");
+        }
+      }
+    } catch (error: unknown) {
+      setAuthMessage(
+        `No se pudo iniciar sesión con Google: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  async function handleStartMfaEnrollment() {
+    if (!supabase) {
+      return;
+    }
+
+    setMfaLoading(true);
+    setMfaMessage("");
+
+    try {
+      const { data, error } = await supabase.auth.mfa.enroll({
+        factorType: "totp",
+        friendlyName: "Google Authenticator",
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      setMfaFactorId(data.id);
+      setMfaSecret(data.totp.secret);
+      setMfaUri(data.totp.uri);
+      setMfaCode("");
+      setMfaMessage("Escanea el código QR con Google Authenticator.");
+    } catch (error: unknown) {
+      setMfaMessage(
+        error instanceof Error
+          ? error.message
+          : "No se pudo iniciar la configuración.",
+      );
+    } finally {
+      setMfaLoading(false);
+    }
+  }
+
+  async function handleVerifyMfaEnrollment() {
+    if (!supabase || !mfaFactorId) {
+      return;
+    }
+
+    if (!/^\d{6}$/.test(mfaCode.trim())) {
+      setMfaMessage("Introduce un código válido de 6 dígitos.");
+      return;
+    }
+
+    setMfaLoading(true);
+    setMfaMessage("");
+
+    try {
+      const { data: challengeData, error: challengeError } =
+        await supabase.auth.mfa.challenge({
+          factorId: mfaFactorId,
+        });
+
+      if (challengeError) {
+        throw challengeError;
+      }
+
+      const { error: verifyError } = await supabase.auth.mfa.verify({
+        factorId: mfaFactorId,
+        challengeId: challengeData.id,
+        code: mfaCode.trim(),
+      });
+
+      if (verifyError) {
+        throw verifyError;
+      }
+
+      setMfaEnabled(true);
+      setMfaSecret("");
+      setMfaUri("");
+      setMfaCode("");
+      setMfaMessage("¡Google Authenticator se ha activado correctamente!");
+    } catch (error: unknown) {
+      setMfaMessage(
+        error instanceof Error
+          ? error.message
+          : "No se pudo verificar el código.",
+      );
+    } finally {
+      setMfaLoading(false);
+    }
+  }
+
+  async function handleVerifyMfaLogin() {
+    if (!supabase || !mfaFactorId) {
+      setMfaLoginMessage("No se encontró un autenticador registrado.");
+      return;
+    }
+
+    if (!/^\d{6}$/.test(mfaLoginCode.trim())) {
+      setMfaLoginMessage("Introduce un código válido de 6 dígitos.");
+      return;
+    }
+
+    setMfaCheckLoading(true);
+    setMfaLoginMessage("");
+
+    try {
+      const { data: challengeData, error: challengeError } =
+        await supabase.auth.mfa.challenge({
+          factorId: mfaFactorId,
+        });
+
+      if (challengeError) {
+        throw challengeError;
+      }
+
+      const { error: verifyError } = await supabase.auth.mfa.verify({
+        factorId: mfaFactorId,
+        challengeId: challengeData.id,
+        code: mfaLoginCode.trim(),
+      });
+
+      if (verifyError) {
+        throw verifyError;
+      }
+
+      setMfaLoginCode("");
+      setMfaLoginMessage("Verificación correcta.");
+      setMfaRequired(false);
+    } catch (error: unknown) {
+      setMfaLoginMessage(
+        error instanceof Error
+          ? error.message
+          : "No se pudo verificar el código.",
+      );
+    } finally {
+      setMfaCheckLoading(false);
+    }
+  }
+
   async function handleSignOut() {
     if (!supabase) {
       return;
@@ -564,6 +851,69 @@ export default function App() {
 
   const ramComparison = comparisons.find((item) => item.name === "Memoria RAM");
 
+  if (session && (mfaCheckLoading || mfaRequired)) {
+    return (
+      <View style={styles.screen}>
+        <StatusBar style="dark" />
+        <View style={[styles.content, { flex: 1, justifyContent: "center" }]}>
+          <View style={styles.card}>
+            <Text style={styles.sectionTitle}>
+              Verificación en dos pasos
+            </Text>
+
+            <Text style={styles.helper}>
+              Tu cuenta tiene Google Authenticator activado. Introduce el código
+              de seis dígitos para continuar.
+            </Text>
+
+            {mfaCheckLoading ? (
+              <Text style={styles.helper}>
+                Comprobando o verificando autenticación...
+              </Text>
+            ) : (
+              <>
+                <TextInput
+                  accessibilityLabel="Código de Google Authenticator"
+                  style={styles.input}
+                  placeholder="Código de 6 dígitos"
+                  placeholderTextColor="#78869a"
+                  value={mfaLoginCode}
+                  onChangeText={(value) =>
+                    setMfaLoginCode(value.replace(/\D/g, "").slice(0, 6))
+                  }
+                  keyboardType="number-pad"
+                  maxLength={6}
+                />
+
+                <Pressable
+                  accessibilityRole="button"
+                  disabled={mfaCheckLoading}
+                  onPress={handleVerifyMfaLogin}
+                  style={styles.button}
+                >
+                  <Text style={styles.buttonText}>Verificar código</Text>
+                </Pressable>
+              </>
+            )}
+
+            {mfaLoginMessage ? (
+              <Text style={styles.error}>{mfaLoginMessage}</Text>
+            ) : null}
+
+            <Pressable
+              accessibilityRole="button"
+              disabled={authLoading || mfaCheckLoading}
+              onPress={handleSignOut}
+              style={styles.secondaryButton}
+            >
+              <Text style={styles.secondaryButtonText}>Cerrar sesión</Text>
+            </Pressable>
+          </View>
+        </View>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.screen}>
       <StatusBar style="dark" />
@@ -634,6 +984,86 @@ export default function App() {
                 Sesión iniciada como {session.user.email ?? "usuario"}.
                 {isAdmin ? " Cuenta administrativa." : ""}
               </Text>
+              <View style={styles.card}>
+                <Text style={styles.sectionTitle}>
+                  Autenticación en dos pasos
+                </Text>
+
+                <Text style={styles.helper}>
+                  Protege tu cuenta utilizando Google Authenticator.
+                </Text>
+
+                {mfaEnabled ? (
+                  <Text style={styles.helper}>
+                    Google Authenticator está activado correctamente.
+                  </Text>
+                ) : mfaUri ? (
+                  <>
+                    <Text style={styles.helper}>
+                      1. Abre Google Authenticator en tu teléfono.
+                    </Text>
+
+                    <Text style={styles.helper}>
+                      2. Escanea este código QR:
+                    </Text>
+
+                    <View
+                      style={{ alignItems: "center", marginVertical: 16 }}
+                    >
+                      <QRCode value={mfaUri} size={190} />
+                    </View>
+
+                    <Text style={styles.helper}>
+                      Si no puedes escanearlo, introduce esta clave manualmente:
+                    </Text>
+
+                    <Text selectable style={styles.helper}>
+                      {mfaSecret}
+                    </Text>
+
+                    <Text style={styles.helper}>
+                      3. Introduce el código de seis dígitos que aparece en tu teléfono:
+                    </Text>
+
+                    <TextInput
+                      style={styles.input}
+                      placeholder="Código de 6 dígitos"
+                      value={mfaCode}
+                      onChangeText={(value) =>
+                        setMfaCode(value.replace(/\D/g, "").slice(0, 6))
+                      }
+                      keyboardType="number-pad"
+                      maxLength={6}
+                    />
+
+                    <Pressable
+                      style={styles.button}
+                      onPress={handleVerifyMfaEnrollment}
+                      disabled={mfaLoading}
+                    >
+                      <Text style={styles.buttonText}>
+                        {mfaLoading ? "Verificando..." : "Verificar y activar"}
+                      </Text>
+                    </Pressable>
+                  </>
+                ) : (
+                  <Pressable
+                    style={styles.button}
+                    onPress={handleStartMfaEnrollment}
+                    disabled={mfaLoading}
+                  >
+                    <Text style={styles.buttonText}>
+                      {mfaLoading
+                        ? "Preparando..."
+                        : "Activar Google Authenticator"}
+                    </Text>
+                  </Pressable>
+                )}
+
+                {mfaMessage ? (
+                  <Text style={styles.helper}>{mfaMessage}</Text>
+                ) : null}
+              </View>
               <Pressable
                 accessibilityRole="button"
                 disabled={authLoading}
@@ -692,6 +1122,16 @@ export default function App() {
                     : authMode === "signup"
                       ? "Crear cuenta"
                       : "Iniciar sesión"}
+                </Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                disabled={authLoading}
+                onPress={handleGoogleSignIn}
+                style={styles.button}
+              >
+                <Text style={styles.buttonText}>
+                  {authLoading ? "Conectando..." : "Continuar con Google"}
                 </Text>
               </Pressable>
               <Pressable
